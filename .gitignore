@@ -1,4 +1,5 @@
 .env
+.env.backup
 
 # Python
 __pycache__/
@@ -35,5 +36,5 @@ logs/
 *.temp
 *.bak
 
-# Entropy
-entropy/temp/
+# Credentials
+credentials/

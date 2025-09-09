@@ -2,6 +2,8 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 import uuid
 import os
 from pathlib import Path
+from PIL import Image
+import io
 
 # Crear instancia de la aplicación FastAPI
 app = FastAPI(
@@ -14,11 +16,6 @@ app = FastAPI(
 async def root():
     """Endpoint raíz de la API"""
     return {"mensaje": "Bienvenido a Faster OCR API"}
-
-@app.get("/hola")
-async def hola():
-    """Endpoint de prueba que retorna un saludo"""
-    return {"mensaje": "¡Hola! La API está funcionando correctamente"}
 
 @app.post("/upload-credential")
 async def upload_credential(
@@ -49,9 +46,17 @@ async def upload_credential(
     unique_filename = f"{uuid.uuid4()}{file_extension}"
     file_path = credentials_dir / unique_filename
     
-    # Guardar archivo
+    # Guardar archivo y obtener información de la imagen
     try:
         content = await file.read()
+        
+        # Obtener dimensiones de la imagen
+        image = Image.open(io.BytesIO(content))
+        width, height = image.size
+        file_size_bytes = len(content)
+        file_size_kb = round(file_size_bytes / 1024, 2)
+        
+        # Guardar archivo
         with open(file_path, "wb") as f:
             f.write(content)
         
@@ -60,8 +65,16 @@ async def upload_credential(
             "filename": unique_filename,
             "side": side,
             "path": str(file_path),
-            "original_filename": file.filename
+            "original_filename": file.filename,
+            "image_info": {
+                "width": width,
+                "height": height,
+                "dimensions": f"{width}x{height}",
+                "file_size_bytes": file_size_bytes,
+                "file_size_kb": file_size_kb,
+                "format": image.format
+            }
         }
     
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error al guardar el archivo: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error al procesar el archivo: {str(e)}")

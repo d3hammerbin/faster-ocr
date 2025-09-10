@@ -274,8 +274,12 @@ def detect_ine_type(text: str, extracted_fields: dict) -> str:
     
     return 'E'  # Por defecto tipo E
 
-def extract_ine_fields_with_ai(text: str) -> dict:
-    """Extrae campos de credencial INE usando OpenAI GPT-4o-mini"""
+def extract_ine_fields_with_ai(text: str) -> tuple:
+    """Extrae campos de credencial INE usando OpenAI GPT-4o-mini
+    
+    Returns:
+        tuple: (extracted_fields, token_usage_info)
+    """
     try:
         prompt = f"""
 Analiza el siguiente texto extraído de una credencial INE mexicana y extrae los campos específicos.
@@ -324,6 +328,14 @@ Respuesta esperada (JSON):
             temperature=float(os.getenv('OPENAI_TEMPERATURE', 0.1))
         )
         
+        # Extraer información de tokens
+        token_usage = response.usage
+        token_info = {
+            "input_tokens": token_usage.prompt_tokens,
+            "output_tokens": token_usage.completion_tokens,
+            "total_tokens": token_usage.total_tokens
+        }
+        
         # Extraer el contenido de la respuesta
         content = response.choices[0].message.content.strip()
         
@@ -338,14 +350,14 @@ Respuesta esperada (JSON):
             extracted_fields = json.loads(content)
             # Filtrar campos nulos
             filtered_fields = {k: v for k, v in extracted_fields.items() if v is not None and v != "null" and v.strip() != ""}
-            return filtered_fields
+            return filtered_fields, token_info
         except json.JSONDecodeError:
             print(f"Error parsing JSON from OpenAI response: {content}")
-            return {}
+            return {}, token_info
             
     except Exception as e:
         print(f"Error en extracción con IA: {str(e)}")
-        return {}
+        return {}, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
 
 # Crear instancia de la aplicación FastAPI
 app = FastAPI(
@@ -458,13 +470,7 @@ async def ine_process(
             detail=f"Formato de archivo no permitido. Solo se aceptan: {', '.join(allowed_extensions)}"
         )
     
-    # Crear directorio credentials si no existe
-    credentials_dir = Path("./credentials")
-    credentials_dir.mkdir(exist_ok=True)
-    
-    # Generar nombre único con UUID-v4
-    unique_filename = f"{uuid.uuid4()}{file_extension}"
-    file_path = credentials_dir / unique_filename
+    # Procesar imagen desde memoria (sin guardar archivo)
     
     try:
         content = await file.read()
@@ -518,16 +524,12 @@ async def ine_process(
             "text_length": len(paddle_text.strip()) if paddle_text else 0
         }
         
-        # Guardar archivo
-        with open(file_path, "wb") as f:
-            f.write(content)
+        # Imagen procesada desde memoria
         
         return {
             "success": True,
             "mensaje": "Credencial INE procesada exitosamente con normalización y extracción de campos específicos",
-            "filename": unique_filename,
             "side": side,
-            "path": str(file_path),
             "original_filename": file.filename,
             "raw_extracted_text": raw_extracted_text,
             "cleaned_text": cleaned_text,
@@ -712,14 +714,7 @@ async def ine_process_ai(
         file_size_bytes = len(content)
         file_size_kb = round(file_size_bytes / 1024, 2)
         
-        # Crear directorio credentials si no existe
-        credentials_dir = Path("./credentials")
-        credentials_dir.mkdir(exist_ok=True)
-        
-        # Crear nombre único para el archivo
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        unique_filename = f"ine_ai_{side}_{timestamp}_{file.filename}"
-        file_path = credentials_dir / unique_filename
+        # Procesar imagen directamente desde memoria (sin guardar en disco)
         
         # Abrir imagen con PIL
         image = Image.open(io.BytesIO(content))
@@ -741,13 +736,30 @@ async def ine_process_ai(
         cleaned_text = clean_extracted_text_advanced(raw_extracted_text)
         
         # Extraer campos INE usando IA
-        ine_fields_ai = extract_ine_fields_with_ai(cleaned_text)
+        ine_fields_ai, token_info = extract_ine_fields_with_ai(cleaned_text)
         
         # Detectar tipo de credencial INE
         tipo_credencial = detect_ine_type(raw_extracted_text, ine_fields_ai)
         
         # Agregar el tipo detectado al objeto ine_fields_ai
         ine_fields_ai["TIPO_CREDENCIAL"] = tipo_credencial
+        
+        # Calcular costos de tokens
+        # Precio por token para gpt-4o-mini (según OpenAI pricing)
+        input_cost_per_token = 0.00000015  # $0.15 per 1M input tokens
+        output_cost_per_token = 0.0000006   # $0.60 per 1M output tokens
+        
+        input_cost_usd = token_info["input_tokens"] * input_cost_per_token
+        output_cost_usd = token_info["output_tokens"] * output_cost_per_token
+        total_cost_usd = input_cost_usd + output_cost_usd
+        
+        # Obtener tasa de cambio USD a MXN del .env
+        usd_mxn_rate = float(os.getenv('USD_MXN', 20))
+        total_cost_mxn = total_cost_usd * usd_mxn_rate
+        
+        # Obtener multiplicador del .env y calcular costo final
+        multiplier = float(os.getenv('MULTIPLIER', 300))
+        final_cost = total_cost_mxn * multiplier
         
         # Obtener información detallada de PaddleOCR
         results = {}
@@ -761,20 +773,22 @@ async def ine_process_ai(
             "text_length": len(paddle_text.strip()) if paddle_text else 0
         }
         
-        # Guardar archivo
-        with open(file_path, "wb") as f:
-            f.write(content)
-        
         return {
             "success": True,
             "mensaje": "Credencial INE procesada exitosamente con IA (GPT-4o-mini) para extracción inteligente de campos",
-            "filename": unique_filename,
             "side": side,
-            "path": str(file_path),
             "original_filename": file.filename,
             "raw_extracted_text": raw_extracted_text,
             "ine_fields_ai": ine_fields_ai,
             "fields_extracted_count": len(ine_fields_ai),
+            "token_usage": {
+                "input_tokens": token_info["input_tokens"],
+                "output_tokens": token_info["output_tokens"],
+                "total_tokens": token_info["total_tokens"],
+                "cost_usd": round(total_cost_usd, 6),
+                "cost_mxn": round(total_cost_mxn, 4),
+                "final_cost": round(final_cost, 2)
+            },
             "image_info": {
                 "width": width,
                 "height": height,

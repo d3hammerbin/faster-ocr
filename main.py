@@ -444,7 +444,7 @@ async def ine_process_ai(
         
         return {
             "success": True,
-            "mensaje": "Credencial INE procesada exitosamente con IA (GPT-4o-mini) para extracción inteligente de campos",
+            "mensaje": "Credencial INE procesada exitosamente con IA",
             "operation_id": operation_id,
             "side": side,
             "original_filename": file.filename,

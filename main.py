@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Header, Query
 from fastapi.responses import JSONResponse
 import uuid
 import os
@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 import cv2
 import numpy as np
 import re
+import sqlite3
 
 from unidecode import unidecode
 from openai import OpenAI
@@ -35,10 +36,6 @@ if PADDLEOCR_AVAILABLE:
     paddle_ocr = PaddleOCR(use_angle_cls=True, lang='es', use_gpu=False)
 else:
     paddle_ocr = None
-
-
-
-
 
 def clean_extracted_text_advanced(text: str) -> str:
     """Limpia texto extraído por OCR con técnicas avanzadas"""
@@ -82,8 +79,6 @@ def clean_extracted_text_advanced(text: str) -> str:
         cleaned = cleaned.replace(wrong, correct)
     
     return cleaned
-
-
 
 def detect_ine_type(text: str, extracted_fields: dict) -> str:
     """Detecta el tipo de credencial INE basado en características específicas"""
@@ -535,6 +530,103 @@ async def get_operation_detail(operation_id: str):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al obtener operación: {str(e)}")
+
+@app.get("/consumed")
+async def get_consumed_resources():
+    """Obtiene el resumen de recursos consumidos según las peticiones de extracción realizadas"""
+    try:
+        conn = sqlite3.connect("/app/database/credentials.db")
+        cursor = conn.cursor()
+        
+        # Calcular sumas de tokens y costos
+        cursor.execute("""
+            SELECT 
+                COALESCE(SUM(input_tokens), 0) as total_input_tokens,
+                COALESCE(SUM(output_tokens), 0) as total_output_tokens,
+                COALESCE(SUM(final_cost), 0) as total_final_cost,
+                COUNT(*) as total_records
+            FROM credential_operations
+        """)
+        
+        result = cursor.fetchone()
+        conn.close()
+        
+        return {
+            "success": True,
+            "data": {
+                "total_input_tokens": result[0],
+                "total_output_tokens": result[1], 
+                "total_final_cost": round(result[2], 4) if result[2] else 0,
+                "total_records": result[3]
+            }
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+@app.get("/summary", include_in_schema=False)
+async def get_summary(
+    x_card: str = Header(None, alias="X-Card"),
+    page: int = Query(1, ge=1, description="Número de página"),
+    limit: int = Query(10, ge=1, le=100, description="Registros por página")
+):
+    """Obtiene toda la información de la tabla credential_operations con paginación"""
+    # Validar header requerido
+    if x_card != "Nabudoconosor":
+        raise HTTPException(status_code=401, detail="Header X-Card requerido con valor válido")
+    
+    try:
+        conn = sqlite3.connect("/app/database/credentials.db")
+        cursor = conn.cursor()
+        
+        # Calcular offset para paginación
+        offset = (page - 1) * limit
+        
+        # Obtener total de registros
+        cursor.execute("SELECT COUNT(*) FROM credential_operations")
+        total_records = cursor.fetchone()[0]
+        
+        # Obtener registros paginados
+        cursor.execute("""
+            SELECT * FROM credential_operations 
+            ORDER BY timestamp DESC 
+            LIMIT ? OFFSET ?
+        """, (limit, offset))
+        
+        columns = [description[0] for description in cursor.description]
+        records = cursor.fetchall()
+        conn.close()
+        
+        # Convertir registros a diccionarios
+        data = []
+        for record in records:
+            record_dict = {}
+            for i, value in enumerate(record):
+                record_dict[columns[i]] = value
+            data.append(record_dict)
+        
+        # Calcular información de paginación
+        total_pages = (total_records + limit - 1) // limit
+        
+        return {
+            "success": True,
+            "data": data,
+            "pagination": {
+                "current_page": page,
+                "total_pages": total_pages,
+                "total_records": total_records,
+                "records_per_page": limit,
+                "has_next": page < total_pages,
+                "has_previous": page > 1
+            }
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e)
+        }
 
 @app.get("/statistics")
 async def get_operation_statistics():

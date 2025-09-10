@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Optional, Dict, Any
 
 # Ruta de la base de datos
-DB_PATH = Path("./credentials.db")
+DB_PATH = Path("/app/database/credentials.db")
 
 def init_database():
     """

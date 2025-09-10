@@ -1,0 +1,34 @@
+version: '2.4'
+
+services:
+  faster-ocr-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: faster-ocr-api-dev
+    ports:
+      - "8000:8000"
+    environment:
+      - TZ=America/Mexico_City
+      - PYTHONPATH=/app
+      - PYTHONUNBUFFERED=1
+      - DEBUG=true
+    env_file:
+      - .env
+    volumes:
+      - .:/app
+      - ./data:/app/data
+      - ./docs:/app/docs
+    command: [
+      "python", "-m", "uvicorn", "main:app", 
+      "--host", "0.0.0.0", 
+      "--port", "8000", 
+      "--reload"
+    ]
+    restart: unless-stopped
+    networks:
+      - faster-ocr-network
+
+networks:
+  faster-ocr-network:
+    driver: bridge

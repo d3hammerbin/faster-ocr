@@ -5,7 +5,7 @@ services:
       dockerfile: Dockerfile
     container_name: faster-ocr-api
     ports:
-      - "8000:8000"
+      - "8008:8000"
     environment:
       - TZ=America/Mexico_City
       - PYTHONPATH=/app

@@ -9,12 +9,14 @@ from dotenv import load_dotenv
 import cv2
 import numpy as np
 import re
-from rapidfuzz import fuzz, process
+
 from unidecode import unidecode
 from openai import OpenAI
 import json
 from datetime import datetime
 import uuid
+import time
+from database import save_credential_operation, get_operations_by_endpoint, get_operation_by_id, get_statistics, init_database
 try:
     from paddleocr import PaddleOCR
     PADDLEOCR_AVAILABLE = True
@@ -34,47 +36,9 @@ if PADDLEOCR_AVAILABLE:
 else:
     paddle_ocr = None
 
-# Campos específicos de credenciales INE mexicanas
-INE_FIELDS = {
-    'NOMBRE': ['NOMBRE'],
-    'FECHA_DE_NACIMIENTO': ['FECHA DE NACIMIENTO', 'NACIMIENTO'],
-    'SEXO': ['SEXO', 'H', 'M'],
-    'DOMICILIO': ['DOMICILIO', 'DIRECCION'],
-    'CLAVE_DE_ELECTOR': ['CLAVE DE ELECTOR', 'CLAVE ELECTOR'],
-    'CURP': ['CURP'],
-    'AÑO_DE_REGISTRO': ['AÑO DE REGISTRO', 'REGISTRO'],
-    'ESTADO': ['ESTADO'],
-    'MUNICIPIO': ['MUNICIPIO'],
-    'SECCION': ['SECCION'],
-    'LOCALIDAD': ['LOCALIDAD'],
-    'EMISION': ['EMISION'],
-    'VIGENCIA': ['VIGENCIA']
-}
 
-# Texto a ignorar en credenciales INE
-IGNORE_TEXT = [
-    'MEXICO',
-    'INSTITUTO NACIONAL ELECTORAL',
-    'INSTITUTONACIONALELECTORAL',
-    'CREDENCIAL PARA VOTAR',
-    'CREDENCIALPARAVOTAR',
-    'ESTADOS UNIDOS MEXICANOS',
-    'MEXICO',
-    'INE',
-    'ELECTORAL'
-]
 
-def normalize_text(text: str) -> str:
-    """Normaliza texto removiendo acentos y caracteres especiales"""
-    if not text:
-        return ""
-    # Convertir a mayúsculas y remover acentos
-    normalized = unidecode(text.upper())
-    # Remover caracteres especiales excepto espacios y números
-    normalized = re.sub(r'[^A-Z0-9\s]', '', normalized)
-    # Limpiar espacios múltiples
-    normalized = re.sub(r'\s+', ' ', normalized).strip()
-    return normalized
+
 
 def clean_extracted_text_advanced(text: str) -> str:
     """Limpia texto extraído por OCR con técnicas avanzadas"""
@@ -82,7 +46,12 @@ def clean_extracted_text_advanced(text: str) -> str:
         return ""
     
     # Normalizar texto
-    cleaned = normalize_text(text)
+    # Convertir a mayúsculas y remover acentos
+    cleaned = unidecode(text.upper())
+    # Remover caracteres especiales excepto espacios y números
+    cleaned = re.sub(r'[^A-Z0-9\s]', '', cleaned)
+    # Limpiar espacios múltiples
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
     
     # Correcciones específicas para OCR de credenciales mexicanas
     corrections = {
@@ -114,116 +83,7 @@ def clean_extracted_text_advanced(text: str) -> str:
     
     return cleaned
 
-def extract_ine_fields(ocr_text: str) -> dict:
-    """Extrae campos específicos de credenciales INE del texto OCR usando patrones robustos"""
-    extracted_fields = {}
-    
-    # Limpiar y normalizar texto
-    cleaned_text = clean_extracted_text_advanced(ocr_text)
-    
-    # Remover texto de IGNORE_TEXT
-    for ignore_text in IGNORE_TEXT:
-        cleaned_text = cleaned_text.replace(ignore_text, ' ')
-    
-    # Normalizar espacios múltiples
-    cleaned_text = re.sub(r'\s+', ' ', cleaned_text).strip()
-    
-    # Patrones específicos para cada campo
-    patterns = {
-        'NOMBRE': {
-            'pattern': r'H\s+([A-ZÁÉÍÓÚÑ\s]+?)\s+DOMICILIO',
-            'fallback': r'SEXO\s+H\s+([A-ZÁÉÍÓÚÑ\s]+?)\s+DOMICILIO'
-        },
-        'SEXO': {
-            'pattern': r'SEXO\s+([HM])',
-            'fallback': r'\b([HM])\b(?=.*DOMICILIO)'
-        },
-        'DOMICILIO': {
-            'pattern': r'DOMICILIO\s+([A-ZÁÉÍÓÚÑ0-9\s,]+?)(?=\s+CLAVEDEELECTOR)',
-            'fallback': r'DOMICILIO\s+([A-ZÁÉÍÓÚÑ0-9\s,]+?)(?=\s+[A-Z]{6}\d{8})'
-        },
-        'CLAVE_DE_ELECTOR': {
-            'pattern': r'CLAVEDEELECTOR([A-Z0-9]{18})',
-            'fallback': r'([A-Z]{6}\d{8}[HM]\d{3})'
-        },
-        'CURP': {
-            'pattern': r'CURP\s+([A-Z]{4}\d{6}[HM][A-Z]{5}\d{2})',
-            'fallback': r'([A-Z]{4}\d{6}[HM][A-Z]{5}\d{2})'
-        },
-        'AÑO_DE_REGISTRO': {
-            'pattern': r'ANODEREGISTRO\s+(\d{6})',
-            'fallback': r'\b(\d{6})\b(?=\s+FECHADENACIMIENTO)'
-        },
-        'FECHA_DE_NACIMIENTO': {
-            'pattern': r'FECHADENACIMIENTO\s+SECCION\s+VIGENCIA\s+(\d{8})\s+\d{4}\s+\d{8}',
-            'fallback': r'\b(\d{8})\b(?=\s+\d{4}\s+\d{8}$)'
-        },
-        'SECCION': {
-            'pattern': r'FECHADENACIMIENTO\s+SECCION\s+VIGENCIA\s+\d{8}\s+(\d{4})\s+\d{8}',
-            'fallback': r'\b\d{8}\s+(\d{4})\s+\d{8}$'
-        },
-        'VIGENCIA': {
-            'pattern': r'FECHADENACIMIENTO\s+SECCION\s+VIGENCIA\s+\d{8}\s+\d{4}\s+(\d{8})',
-            'fallback': r'\b\d{8}\s+\d{4}\s+(\d{8})$'
-        }
-    }
-    
-    # Extraer cada campo usando los patrones
-    for field_name, config in patterns.items():
-        field_value = None
-        
-        # Intentar patrón principal
-        match = re.search(config['pattern'], cleaned_text, re.IGNORECASE)
-        if match:
-            field_value = match.group(1).strip()
-        else:
-            # Intentar patrón de respaldo
-            if 'fallback' in config:
-                match = re.search(config['fallback'], cleaned_text, re.IGNORECASE)
-                if match:
-                    field_value = match.group(1).strip()
-        
-        # Limpiar y validar el valor extraído
-        if field_value:
-            # Remover espacios extra y caracteres no deseados
-            field_value = re.sub(r'\s+', ' ', field_value).strip()
-            
-            # Validaciones específicas por campo
-            if field_name == 'NOMBRE' and len(field_value) > 5 and 'SEXO' not in field_value:
-                extracted_fields[field_name] = field_value
-            elif field_name == 'SEXO' and field_value in ['H', 'M']:
-                extracted_fields[field_name] = field_value
-            elif field_name == 'DOMICILIO' and len(field_value) > 10:
-                extracted_fields[field_name] = field_value
-            elif field_name == 'CLAVE DE ELECTOR' and len(field_value) == 18:
-                extracted_fields[field_name] = field_value
-            elif field_name == 'CURP' and len(field_value) == 18:
-                extracted_fields[field_name] = field_value
-            elif field_name == 'AÑO DE REGISTRO' and len(field_value) == 6:
-                extracted_fields[field_name] = field_value
-            elif field_name == 'FECHA DE NACIMIENTO' and len(field_value) == 8:
-                # Formatear fecha de DDMMAAAA a DD/MM/AAAA
-                formatted_date = f"{field_value[:2]}/{field_value[2:4]}/{field_value[4:]}"
-                extracted_fields[field_name] = formatted_date
-            elif field_name == 'SECCION' and len(field_value) == 4:
-                extracted_fields[field_name] = field_value
-            elif field_name == 'VIGENCIA' and len(field_value) == 8:
-                # Formatear vigencia de AAAAAAAA a AAAA-AAAA
-                formatted_vigencia = f"{field_value[:4]}-{field_value[4:]}"
-                extracted_fields[field_name] = formatted_vigencia
-    
-    return extracted_fields
 
-def fuzzy_match_correction(text: str, reference_list: list, threshold: int = 80) -> str:
-    """Corrige texto usando fuzzy matching contra una lista de referencia"""
-    if not text or not reference_list:
-        return text
-    
-    match = process.extractOne(text, reference_list, scorer=fuzz.ratio)
-    if match and match[1] >= threshold:
-        return match[0]
-    
-    return text
 
 def detect_ine_type(text: str, extracted_fields: dict) -> str:
     """Detecta el tipo de credencial INE basado en características específicas"""
@@ -308,7 +168,7 @@ Respuesta esperada (JSON):
   "DOMICILIO": "valor o null",
   "CLAVE_DE_ELECTOR": "valor o null",
   "CURP": "valor o null",
-  "ANO_DE_REGISTRO": "valor o null",
+  "AÑO_DE_REGISTRO": "valor o null",
   "FECHA_DE_NACIMIENTO": "valor o null",
   "SECCION": "valor o null",
   "VIGENCIA": "valor o null",
@@ -365,6 +225,9 @@ app = FastAPI(
     description="API para procesamiento rápido de OCR",
     version="1.0.0"
 )
+
+# Inicializar la base de datos al arrancar la aplicación
+init_database()
 
 @app.get("/")
 async def root():
@@ -441,244 +304,6 @@ def extract_text_hybrid_ocr(img_array):
     print("No se pudo extraer texto con PaddleOCR")
     return ""
 
-@app.post("/ine-process")
-async def ine_process(
-    file: UploadFile = File(...),
-    side: str = Form(default="front")
-):
-    """
-    Procesa una imagen de credencial INE usando PaddleOCR con normalización y extracción de campos específicos.
-    
-    Args:
-        file: Archivo de imagen a procesar
-        side: Lado de la credencial ("front" o "back", por defecto "front")
-    
-    Returns:
-        JSON con texto extraído, campos específicos de INE, información del archivo y metadatos
-    """
-    # Validar que el parámetro side sea válido
-    if side not in ["front", "back"]:
-        raise HTTPException(status_code=400, detail="El parámetro 'side' debe ser 'front' o 'back'")
-    
-    # Validar formato de archivo
-    allowed_extensions = [".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"]
-    file_extension = Path(file.filename).suffix.lower()
-    
-    if file_extension not in allowed_extensions:
-        raise HTTPException(
-            status_code=400, 
-            detail=f"Formato de archivo no permitido. Solo se aceptan: {', '.join(allowed_extensions)}"
-        )
-    
-    # Procesar imagen desde memoria (sin guardar archivo)
-    
-    try:
-        content = await file.read()
-        image = Image.open(io.BytesIO(content))
-        
-        # Obtener información de la imagen
-        width, height = image.size
-        file_size_bytes = len(content)
-        file_size_kb = round(file_size_bytes / 1024, 2)
-        
-        # Preprocesar imagen
-        def preprocess_for_comparison(img):
-            import cv2
-            import numpy as np
-            
-            img_array = np.array(img)
-            if len(img_array.shape) == 3:
-                gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
-            else:
-                gray = img_array
-            
-            # Redimensionar y mejorar
-            gray = cv2.resize(gray, (790, 500), interpolation=cv2.INTER_CUBIC)
-            gray = cv2.bilateralFilter(gray, 9, 75, 75)
-            clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-            gray = clahe.apply(gray)
-            
-            return gray
-        
-        processed_array = preprocess_for_comparison(image)
-        
-        # Extraer texto usando PaddleOCR
-        raw_extracted_text = extract_text_hybrid_ocr(processed_array)
-        
-        # Aplicar normalización y limpieza avanzada
-        cleaned_text = clean_extracted_text_advanced(raw_extracted_text)
-        
-        # Extraer campos específicos de credencial INE
-        ine_fields = extract_ine_fields(raw_extracted_text)
-        
-        # Probar PaddleOCR únicamente
-        results = {}
-        
-        # PaddleOCR
-        paddle_text, paddle_conf, paddle_method = extract_text_with_paddleocr(processed_array)
-        results["paddleocr"] = {
-            "text": paddle_text,
-            "confidence": paddle_conf,
-            "method": paddle_method,
-            "available": PADDLEOCR_AVAILABLE,
-            "text_length": len(paddle_text.strip()) if paddle_text else 0
-        }
-        
-        # Imagen procesada desde memoria
-        
-        return {
-            "success": True,
-            "mensaje": "Credencial INE procesada exitosamente con normalización y extracción de campos específicos",
-            "side": side,
-            "original_filename": file.filename,
-            "raw_extracted_text": raw_extracted_text,
-            "cleaned_text": cleaned_text,
-            "ine_fields": ine_fields,
-            "fields_extracted_count": len(ine_fields),
-            "image_info": {
-                "width": width,
-                "height": height,
-                "dimensions": f"{width}x{height}",
-                "file_size_bytes": file_size_bytes,
-                "file_size_kb": file_size_kb,
-                "format": image.format
-            },
-            "results": results,
-            "best_method": "paddleocr",
-            "best_text": paddle_text,
-            "extracted_text": raw_extracted_text,
-            "comparison_summary": {
-                "total_methods": 1,
-                "available_methods": 1 if PADDLEOCR_AVAILABLE else 0,
-                "methods_with_text": 1 if paddle_text and len(paddle_text.strip()) > 0 else 0
-            }
-        }
-    
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error al procesar credencial INE: {str(e)}")
-
-@app.post("/validate-ine-field")
-async def validate_ine_field(
-    field_name: str = Form(...),
-    field_value: str = Form(...),
-    reference_values: str = Form(default="")
-):
-    """
-    Valida un campo específico de credencial INE usando fuzzy matching.
-    
-    Args:
-        field_name: Nombre del campo a validar
-        field_value: Valor del campo extraído
-        reference_values: Valores de referencia separados por comas (opcional)
-    
-    Returns:
-        JSON con resultado de validación y correcciones sugeridas
-    """
-    try:
-        # Normalizar el valor del campo
-        normalized_value = clean_extracted_text_advanced(field_value)
-        
-        # Verificar si el campo es válido
-        if field_name not in INE_FIELDS:
-            available_fields = list(INE_FIELDS.keys())
-            return JSONResponse(content={
-                "success": False,
-                "error": f"Campo '{field_name}' no válido",
-                "available_fields": available_fields
-            })
-        
-        # Procesar valores de referencia si se proporcionan
-        reference_list = []
-        if reference_values:
-            reference_list = [ref.strip() for ref in reference_values.split(",") if ref.strip()]
-        
-        # Aplicar corrección con fuzzy matching si hay referencias
-        corrected_value = normalized_value
-        similarity_score = 100
-        
-        if reference_list:
-            corrected_value = fuzzy_match_correction(normalized_value, reference_list)
-            # Calcular similitud con el mejor match
-            best_match = process.extractOne(normalized_value, reference_list, scorer=fuzz.ratio)
-            if best_match:
-                similarity_score = best_match[1]
-        
-        return JSONResponse(content={
-            "success": True,
-            "field_name": field_name,
-            "original_value": field_value,
-            "normalized_value": normalized_value,
-            "corrected_value": corrected_value,
-            "similarity_score": similarity_score,
-            "is_valid": similarity_score >= 80,
-            "reference_values": reference_list,
-            "message": "Campo validado exitosamente"
-        })
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error validando campo INE: {str(e)}")
-
-@app.post("/text-similarity")
-async def calculate_text_similarity(
-    text1: str = Form(...),
-    text2: str = Form(...),
-    normalize: bool = Form(default=True)
-):
-    """
-    Calcula la similitud entre dos textos usando fuzzy matching.
-    
-    Args:
-        text1: Primer texto a comparar
-        text2: Segundo texto a comparar
-        normalize: Si aplicar normalización a los textos
-    
-    Returns:
-        JSON con puntuaciones de similitud usando diferentes algoritmos
-    """
-    try:
-        # Aplicar normalización si se solicita
-        processed_text1 = clean_extracted_text_advanced(text1) if normalize else text1
-        processed_text2 = clean_extracted_text_advanced(text2) if normalize else text2
-        
-        # Calcular diferentes tipos de similitud
-        ratio_score = fuzz.ratio(processed_text1, processed_text2)
-        partial_ratio_score = fuzz.partial_ratio(processed_text1, processed_text2)
-        token_sort_score = fuzz.token_sort_ratio(processed_text1, processed_text2)
-        token_set_score = fuzz.token_set_ratio(processed_text1, processed_text2)
-        
-        # Calcular promedio ponderado
-        weighted_average = (
-            ratio_score * 0.3 +
-            partial_ratio_score * 0.2 +
-            token_sort_score * 0.25 +
-            token_set_score * 0.25
-        )
-        
-        return JSONResponse(content={
-            "success": True,
-            "text1": {
-                "original": text1,
-                "processed": processed_text1
-            },
-            "text2": {
-                "original": text2,
-                "processed": processed_text2
-            },
-            "similarity_scores": {
-                "ratio": ratio_score,
-                "partial_ratio": partial_ratio_score,
-                "token_sort_ratio": token_sort_score,
-                "token_set_ratio": token_set_score,
-                "weighted_average": round(weighted_average, 2)
-            },
-            "is_similar": weighted_average >= 80,
-            "normalization_applied": normalize,
-            "message": "Similitud calculada exitosamente"
-        })
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error calculando similitud: {str(e)}")
-
 @app.post("/ine-process-ai")
 async def ine_process_ai(
     file: UploadFile = File(...),
@@ -709,6 +334,7 @@ async def ine_process_ai(
         )
     
     try:
+        start_time = time.time()
         # Leer contenido del archivo
         content = await file.read()
         file_size_bytes = len(content)
@@ -773,22 +399,58 @@ async def ine_process_ai(
             "text_length": len(paddle_text.strip()) if paddle_text else 0
         }
         
+        # Calcular tiempo de procesamiento
+        processing_time_ms = int((time.time() - start_time) * 1000)
+        
+        # Preparar datos para guardar en base de datos
+        image_info = {
+            "width": width,
+            "height": height,
+            "dimensions": f"{width}x{height}",
+            "file_size_bytes": file_size_bytes,
+            "file_size_kb": file_size_kb,
+            "format": image.format
+        }
+        
+        token_usage_data = {
+            "input_tokens": token_info["input_tokens"],
+            "output_tokens": token_info["output_tokens"],
+            "total_tokens": token_info["total_tokens"],
+            "cost_usd": round(total_cost_usd, 6),
+            "cost_mxn": round(total_cost_mxn, 4),
+            "final_cost": round(final_cost, 2)
+        }
+        
+        # Guardar en base de datos
+        operation_id = save_credential_operation(
+            endpoint="/ine-process-ai",
+            side=side,
+            original_filename=file.filename,
+            image_info=image_info,
+            raw_extracted_text=raw_extracted_text,
+            cleaned_text=cleaned_text,
+            best_text=raw_extracted_text,
+            best_method="paddleocr",
+            ine_fields=ine_fields_ai,
+            token_usage=token_usage_data,
+            paddleocr_results={
+                "confidence": 95.0,  # Valor por defecto para PaddleOCR
+                "available": True,
+                "text_length": len(raw_extracted_text)
+            },
+            success=True,
+            processing_time_ms=processing_time_ms
+        )
+        
         return {
             "success": True,
             "mensaje": "Credencial INE procesada exitosamente con IA (GPT-4o-mini) para extracción inteligente de campos",
+            "operation_id": operation_id,
             "side": side,
             "original_filename": file.filename,
             "raw_extracted_text": raw_extracted_text,
             "ine_fields_ai": ine_fields_ai,
             "fields_extracted_count": len(ine_fields_ai),
-            "token_usage": {
-                "input_tokens": token_info["input_tokens"],
-                "output_tokens": token_info["output_tokens"],
-                "total_tokens": token_info["total_tokens"],
-                "cost_usd": round(total_cost_usd, 6),
-                "cost_mxn": round(total_cost_mxn, 4),
-                "final_cost": round(final_cost, 2)
-            },
             "image_info": {
                 "width": width,
                 "height": height,
@@ -796,11 +458,100 @@ async def ine_process_ai(
                 "file_size_bytes": file_size_bytes,
                 "file_size_kb": file_size_kb,
                 "format": image.format
-            }
+            },
+            "processing_time_ms": processing_time_ms
         }
     
     except Exception as e:
+        # Guardar error en base de datos
+        try:
+            processing_time_ms = int((time.time() - start_time) * 1000) if 'start_time' in locals() else None
+            save_credential_operation(
+                endpoint="/ine-process-ai",
+                side=side,
+                original_filename=file.filename if file else "unknown",
+                image_info={},
+                raw_extracted_text="",
+                success=False,
+                error_message=str(e),
+                processing_time_ms=processing_time_ms
+            )
+        except:
+            pass  # Si falla el guardado del error, no interrumpir la respuesta
+        
         raise HTTPException(status_code=500, detail=f"Error al procesar credencial INE con IA: {str(e)}")
+
+@app.get("/operations")
+async def get_operations(
+    endpoint: str = None,
+    limit: int = 10
+):
+    """
+    Obtiene las operaciones guardadas en la base de datos.
+    
+    Args:
+        endpoint: Filtrar por endpoint específico (/ine-process-ai)
+        limit: Número máximo de resultados (por defecto 10)
+    
+    Returns:
+        JSON con las operaciones encontradas
+    """
+    try:
+        if endpoint:
+            operations = get_operations_by_endpoint(endpoint, limit)
+        else:
+            # Solo obtener operaciones de /ine-process-ai
+            operations = get_operations_by_endpoint("/ine-process-ai", limit)
+        
+        return {
+            "success": True,
+            "total_operations": len(operations),
+            "operations": operations
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al obtener operaciones: {str(e)}")
+
+@app.get("/operations/{operation_id}")
+async def get_operation_detail(operation_id: str):
+    """
+    Obtiene los detalles de una operación específica.
+    
+    Args:
+        operation_id: ID único de la operación
+    
+    Returns:
+        JSON con los detalles de la operación
+    """
+    try:
+        operation = get_operation_by_id(operation_id)
+        if not operation:
+            raise HTTPException(status_code=404, detail="Operación no encontrada")
+        
+        return {
+            "success": True,
+            "operation": operation
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al obtener operación: {str(e)}")
+
+@app.get("/statistics")
+async def get_operation_statistics():
+    """
+    Obtiene estadísticas generales de las operaciones.
+    
+    Returns:
+        JSON con estadísticas de uso
+    """
+    try:
+        stats = get_statistics()
+        return {
+            "success": True,
+            "statistics": stats
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al obtener estadísticas: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn

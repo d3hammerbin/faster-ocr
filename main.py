@@ -1,5 +1,6 @@
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Header, Query
 from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 import uuid
 import os
 from pathlib import Path
@@ -219,6 +220,15 @@ app = FastAPI(
     title="Faster OCR API",
     description="API para procesamiento rápido de OCR",
     version="1.0.0"
+)
+
+# Configurar CORS para permitir acceso desde cualquier origen
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Permite todos los orígenes
+    allow_credentials=True,
+    allow_methods=["*"],  # Permite todos los métodos HTTP
+    allow_headers=["*"],  # Permite todos los headers
 )
 
 # Inicializar la base de datos al arrancar la aplicación

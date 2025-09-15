@@ -16,6 +16,7 @@ services:
       - ./data:/app/data
       - ./docs:/app/docs
       - .:/app/host
+      - ./database:/app/database
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/"]

@@ -44,9 +44,12 @@ Thumbs.db
 logs
 
 # Database files (will be mounted as volume)
-*.db
+# *.db
 *.sqlite
 *.sqlite3
+
+# Except the main credentials database
+!credentials.db
 
 # Temporary files
 *.tmp
